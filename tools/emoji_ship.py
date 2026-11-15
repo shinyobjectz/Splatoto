@@ -164,7 +164,7 @@ def lab_L(rgb):
     return np.where(Y > 0.008856, 116 * np.cbrt(Y) - 16, 903.3 * Y)
 
 
-@app.cls(gpu=["L4", "A10G", "T4"], volumes={"/vol": vol}, timeout=1800, memory=16384, max_containers=10,
+@app.cls(gpu=["T4", "L4", "A10G"], volumes={"/vol": vol}, timeout=1800, memory=8192, max_containers=10,
          secrets=[modal.Secret.from_name("splats-r2", required_keys=["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT"])])
 class Ship:
     @modal.method()
@@ -201,7 +201,10 @@ class Ship:
                 webp(atlas(v, 9), f"{dst}/tint/{n}/{code}.webp")
             info["tints"] = sorted(TINTS)
             info["seconds"] = round(time.time() - t0, 2)
-        json.dump(info, open(jpath, "w"))
+        json.dump(info, open(jpath + ".part", "w")); os.replace(jpath + ".part", jpath)   # pack never reads half a file
+        self.n = getattr(self, "n", 0) + 1
+        if self.n % 20 == 0:
+            vol.commit()                                   # so pack (another container) sees finished emoji
         return info
 
     def full(self, code, a, cam, pose, r, g, upload, t0):
@@ -267,68 +270,122 @@ TURN = ("_360.webp", "_360_parts.webp")
 
 @app.function(volumes={"/vol": vol}, timeout=3600, cpu=4, memory=8192,
               secrets=[modal.Secret.from_name("media-r2", required_keys=["MEDIA_R2_ACCESS_KEY_ID", "MEDIA_R2_SECRET_ACCESS_KEY", "MEDIA_R2_ENDPOINT"])])
-def pack(meta: dict, upload: bool = False, version: str = "v1") -> dict:
-    """index.json over every shipped emoji, one zip per Unicode group in /vol/emoji/pack/ (the GitHub release), and
-    with upload the sprites + index.json to the bucket MEDIA_BUCKET under emoji3d/<version>/ (public)."""
+def pack(meta: dict, upload: bool = False, version: str = "v1", index_only: bool = False, zips: bool = False) -> dict:
+    """index.json over the shipped emoji. With upload: lists what the bucket MEDIA_BUCKET under emoji3d/<version>/ already holds,
+    uploads only what is missing (index_only: nothing), and lists an emoji in index.json only once ALL its files are
+    there, so the index never points at a missing file. With zips: one zip per Unicode group in /vol/emoji/pack/
+    (the GitHub release). Prints progress as it goes."""
     import glob, re, zipfile
+    import numpy as np
+    from PIL import Image
     from concurrent.futures import ThreadPoolExecutor
+    say = lambda *a: print(*a, flush=True)
     vol.reload()
     ship, out = "/vol/emoji/ship", "/vol/emoji/pack"
     os.makedirs(out, exist_ok=True)
-    index = {"version": version, "tint_hues": TINTS, "cell": CELL, "fill": FILL, "pitches": PITCHES, "cone_yaws": CONE_YAWS, "turn_yaws": TURN_YAWS,
-             "source": "googlefonts/noto-emoji 3D/png/512 @ 99701e0", "licence": "OFL-1.1", "emoji": {}}
-    for j in sorted(glob.glob(f"{ship}/*.json")):
-        info = json.load(open(j)); code = info["code"]
+    # front_box: where the plain atlas's front cell (col 4, row 2) has alpha over 24/255, [l, t, r, b] in 0..1 of the
+    # cell (r, b exclusive), for sizing emoji by their real extent. Cached, since it needs each atlas read
+    box_path = f"{out}/front_box.json"
+    boxes = json.load(open(box_path)) if os.path.exists(box_path) else {}
+
+    def front_box(code):
+        a = np.asarray(Image.open(f"{ship}/{code}.webp").crop((4 * CELL, 2 * CELL, 5 * CELL, 3 * CELL)).getchannel("A"))
+        ys, xs = np.nonzero(a > 24)
+        return None if not len(xs) else [round(float(xs.min()) / CELL, 3), round(float(ys.min()) / CELL, 3),
+                                         round(float(xs.max() + 1) / CELL, 3), round(float(ys.max() + 1) / CELL, 3)]
+
+    entries = {}
+    js = sorted(glob.glob(f"{ship}/*.json"))
+    say(f"pack: {len(js)} shipped")
+    for i, j in enumerate(js):
+        try:
+            info = json.load(open(j))
+        except Exception as e:
+            say("skip", j, e); continue
+        code = info["code"]
         m = meta.get(code, {"group": "Other", "subgroup": "other", "name": code, "char": ""})
-        index["emoji"][code] = {"name": m["name"], "char": m["char"], "group": m["group"], "subgroup": m["subgroup"],
-                                "has360": back_ok(info["back"], info["groups"]["body_lab"]),
-                                "tints": all(os.path.exists(f"{ship}/tint/{n}/{code}.webp") for n in TINTS), "front_iou": info["front"]["iou"], "front_colour_err": info["front"]["colour_err"],
-                                "body_lab": info["groups"]["body_lab"]}
+        if code not in boxes:
+            boxes[code] = front_box(code)
+        e = {"name": m["name"], "char": m["char"], "group": m["group"], "subgroup": m["subgroup"],
+             "has360": back_ok(info["back"], info["groups"]["body_lab"]),
+             "tints": all(os.path.exists(f"{ship}/tint/{n}/{code}.webp") for n in TINTS),
+             "front_iou": info["front"]["iou"], "front_colour_err": info["front"]["colour_err"], "body_lab": info["groups"]["body_lab"]}
+        if boxes[code]:
+            e["front_box"] = boxes[code]
+        entries[code] = e
+        if i % 500 == 499:
+            say(f"read {i + 1}")
+    json.dump(boxes, open(box_path, "w"))
     files = lambda c, e: list(SPRITES) + (list(TURN) if e["has360"] else [])
-    slug = lambda g: re.sub(r"[^a-z0-9]+", "-", g.lower()).strip("-")
-    groups = {}
-    for c, e in index["emoji"].items():
-        groups.setdefault(e["group"], []).append(c)
-    idx_bytes = json.dumps(index, ensure_ascii=False, separators=(",", ":")).encode()
-    open(f"{out}/index.json", "wb").write(idx_bytes)
-    zips = {}
-    for g, codes in groups.items():
-        zp = f"{out}/splatoto-{version}-{slug(g)}.zip"
-        with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_STORED, strict_timestamps=False) as z:
-            z.write("/root/OFL.txt", "OFL.txt")
-            sub = {**index, "emoji": {c: index["emoji"][c] for c in codes}}
-            z.writestr("index.json", json.dumps(sub, ensure_ascii=False, indent=0))
-            for c in codes:
-                for k in files(c, index["emoji"][c]):
-                    z.write(f"{ship}/{c}{k}", f"{c}{k}")
-        os.replace(zp + ".part", zp)
-        zips[os.path.basename(zp)] = {"emoji": len(codes), "bytes": os.path.getsize(zp)}
-    vol.commit()
-    res = {"emoji": len(index["emoji"]), "has360": sum(e["has360"] for e in index["emoji"].values()), "zips": zips}
+    tint_keys = lambda c: [f"tint/{n}/{c}.webp" for n in TINTS]
+    pre = f"emoji3d/{version}/"
+    res = {"shipped": len(entries)}
     if upload:
         import boto3
+        mk = lambda: boto3.client("s3", endpoint_url=os.environ["MEDIA_R2_ENDPOINT"], aws_access_key_id=os.environ["MEDIA_R2_ACCESS_KEY_ID"],
+                                  aws_secret_access_key=os.environ["MEDIA_R2_SECRET_ACCESS_KEY"], region_name="auto")
+        s3 = mk(); have = set()
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=os.environ.get("MEDIA_BUCKET", "media"), Prefix=pre):
+            have |= {o["Key"][len(pre):] for o in page.get("Contents", [])}
+        want = [(f"{c}{k}", f"{ship}/{c}{k}") for c, e in entries.items() for k in files(c, e)]
+        want += [(k, f"{ship}/{k}") for c, e in entries.items() if e["tints"] for k in tint_keys(c)]
+        todo = [] if index_only else [(k, p) for k, p in want if k not in have]
+        say(f"R2 holds {len(have)}; {len(todo)} to upload")
+        local = __import__("threading").local()
+
         def put(item):
-            key, path, ctype, cache = item
-            s3 = boto3.client("s3", endpoint_url=os.environ["MEDIA_R2_ENDPOINT"], aws_access_key_id=os.environ["MEDIA_R2_ACCESS_KEY_ID"],
-                              aws_secret_access_key=os.environ["MEDIA_R2_SECRET_ACCESS_KEY"], region_name="auto")
-            s3.upload_file(path, os.environ.get("MEDIA_BUCKET", "media"), key, ExtraArgs={"ContentType": ctype, "CacheControl": cache})
-        items = [(f"emoji3d/{version}/{c}{k}", f"{ship}/{c}{k}", "image/webp", "public, max-age=31536000, immutable")
-                 for c, e in index["emoji"].items() for k in files(c, e)]
-        items += [(f"emoji3d/{version}/tint/{n}/{c}.webp", f"{ship}/tint/{n}/{c}.webp", "image/webp", "public, max-age=31536000, immutable")
-                  for c, e in index["emoji"].items() if e["tints"] for n in TINTS]
+            k, p = item
+            if not hasattr(local, "s3"):
+                local.s3 = mk()
+            local.s3.upload_file(p, os.environ.get("MEDIA_BUCKET", "media"), pre + k, ExtraArgs={"ContentType": "image/webp", "CacheControl": "public, max-age=31536000, immutable"})
+            return k
         with ThreadPoolExecutor(32) as ex:
-            list(ex.map(put, items))
-        put((f"emoji3d/{version}/index.json", f"{out}/index.json", "application/json", "public, max-age=300"))
-        res["uploaded"] = len(items) + 1
+            for n, k in enumerate(ex.map(put, todo)):
+                have.add(k)
+                if n % 500 == 499:
+                    say(f"uploaded {n + 1}/{len(todo)}")
+        listed = {c: e for c, e in entries.items() if all(f"{c}{k}" in have for k in files(c, e))}
+        for c, e in listed.items():
+            e["tints"] = e["tints"] and all(k in have for k in tint_keys(c))
+        res.update({"uploaded": len(todo), "listed": len(listed)})
+    else:
+        listed = entries
+    index = {"version": version, "tint_hues": TINTS, "cell": CELL, "fill": FILL, "pitches": PITCHES, "cone_yaws": CONE_YAWS,
+             "turn_yaws": TURN_YAWS, "source": "googlefonts/noto-emoji 3D/png/512 @ 99701e0", "licence": "OFL-1.1", "emoji": listed}
+    open(f"{out}/index.json", "w").write(json.dumps(index, ensure_ascii=False, separators=(",", ":")))
+    if upload:
+        mk().upload_file(f"{out}/index.json", os.environ.get("MEDIA_BUCKET", "media"), pre + "index.json",
+                         ExtraArgs={"ContentType": "application/json", "CacheControl": "public, max-age=300"})
+        say(f"index.json: {len(listed)} emoji")
+    res["has360"] = sum(e["has360"] for e in listed.values())
+    res["tints"] = sum(e["tints"] for e in listed.values())
+    if zips:
+        slug = lambda g: re.sub(r"[^a-z0-9]+", "-", g.lower()).strip("-")
+        groups = {}
+        for c, e in listed.items():
+            groups.setdefault(e["group"], []).append(c)
+        res["zips"] = {}
+        for g, codes in groups.items():
+            zp = f"{out}/splatoto-{version}-{slug(g)}.zip"
+            with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_STORED, strict_timestamps=False) as z:
+                z.write("/root/OFL.txt", "OFL.txt")
+                z.writestr("index.json", json.dumps({**index, "emoji": {c: listed[c] for c in codes}}, ensure_ascii=False, indent=0))
+                for c in codes:
+                    for k in files(c, listed[c]):
+                        z.write(f"{ship}/{c}{k}", f"{c}{k}")
+            os.replace(zp + ".part", zp)
+            res["zips"][os.path.basename(zp)] = {"emoji": len(codes), "bytes": os.path.getsize(zp)}
+            say("zip", os.path.basename(zp), len(codes))
+    vol.commit()
     return res
 
 
 @app.local_entrypoint()
 def main(codes: str = "", list: str = "", containers: int = 10, upload: bool = False, force: bool = False,
-         do_pack: bool = False, retint: bool = False):
+         do_pack: bool = False, retint: bool = False, index_only: bool = False, zips: bool = False):
     if do_pack:
         meta = json.load(open("codes_meta.json"))
-        print(json.dumps(pack.remote(meta, upload=upload), indent=1))
+        print(json.dumps(pack.remote(meta, upload=upload, index_only=index_only, zips=zips), indent=1))
         return
     todo = [c for c in codes.split(",") if c] or [l.strip() for l in open(list) if l.strip()]
     t0 = time.time()
