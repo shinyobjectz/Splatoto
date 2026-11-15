@@ -121,9 +121,12 @@ def move(lab, m, t, chroma_from_target=True, hue_keep=0.35):
     tL, tC, tH = t[0], np.hypot(t[1], t[2]), np.arctan2(t[2], t[1])
     dL = L - mL
     nL = tL + dL * np.clip(np.where(dL > 0, (100 - tL) / max(100 - mL, 1), tL / max(mL, 1)), 0.3, 1.6)
-    nC = Cc * (tC / max(mC, 1)) if chroma_from_target else Cc
     dH = (H - mH + np.pi) % (2 * np.pi) - np.pi           # each colour's hue offset from the mean, narrowed so a
     nH = tH + dH * hue_keep                                 # tint reads as one colour (yellow highlights don't go violet)
+    if mC < 12:                                             # a near-grey body (a raccoon's fur): its chroma is noise, so
+        nC, nH = np.full_like(Cc, tC), np.full_like(H, tH)  # colour it evenly instead of scaling the noise up
+    else:
+        nC = Cc * (tC / mC) if chroma_from_target else Cc
     return np.stack([nL, nC * np.cos(nH), nC * np.sin(nH)], 1)
 
 

@@ -168,7 +168,7 @@ def lab_L(rgb):
          secrets=[modal.Secret.from_name("splats-r2", required_keys=["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_ENDPOINT"])])
 class Ship:
     @modal.method()
-    def run(self, code: str, upload: bool = False, force: bool = False, tints: bool = True):
+    def run(self, code: str, upload: bool = False, force: bool = False, tints: bool = True, retint: bool = False):
         import sys
         sys.path.insert(0, "/root")
         import numpy as np
@@ -178,7 +178,7 @@ class Ship:
         os.makedirs(dst, exist_ok=True)
         jpath = f"{dst}/{code}.json"
         have = os.path.exists(jpath) and not force
-        tint_have = all(os.path.exists(f"{dst}/tint/{n}/{code}.webp") for n in TINTS)
+        tint_have = not retint and all(os.path.exists(f"{dst}/tint/{n}/{code}.webp") for n in TINTS)
         if have and (tint_have or not tints):
             return {"code": code, "skipped": True}
         if not os.path.exists(f"{src}/{code}.ply"):
@@ -294,7 +294,7 @@ def pack(meta: dict, upload: bool = False, version: str = "v1") -> dict:
     zips = {}
     for g, codes in groups.items():
         zp = f"{out}/splatoto-{version}-{slug(g)}.zip"
-        with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_STORED) as z:
+        with zipfile.ZipFile(zp + ".part", "w", zipfile.ZIP_STORED, strict_timestamps=False) as z:
             z.write("/root/OFL.txt", "OFL.txt")
             sub = {**index, "emoji": {c: index["emoji"][c] for c in codes}}
             z.writestr("index.json", json.dumps(sub, ensure_ascii=False, indent=0))
@@ -325,7 +325,7 @@ def pack(meta: dict, upload: bool = False, version: str = "v1") -> dict:
 
 @app.local_entrypoint()
 def main(codes: str = "", list: str = "", containers: int = 10, upload: bool = False, force: bool = False,
-         do_pack: bool = False):
+         do_pack: bool = False, retint: bool = False):
     if do_pack:
         meta = json.load(open("codes_meta.json"))
         print(json.dumps(pack.remote(meta, upload=upload), indent=1))
@@ -334,7 +334,7 @@ def main(codes: str = "", list: str = "", containers: int = 10, upload: bool = F
     t0 = time.time()
     cls = Ship.with_options(max_containers=containers)
     with open("ship_runs.jsonl", "a") as log:
-        for r in cls().run.map(todo, kwargs={"upload": upload, "force": force}, return_exceptions=True):
+        for r in cls().run.map(todo, kwargs={"upload": upload, "force": force, "retint": retint}, return_exceptions=True):
             r = r if isinstance(r, dict) else {"error": repr(r)[:400]}
             log.write(json.dumps(r) + "\n"); log.flush()
             print(json.dumps({k: r.get(k) for k in ("code", "front", "back", "seconds", "error", "skipped", "missing")})[:300])

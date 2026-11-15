@@ -55,7 +55,9 @@ function move(L, C, H, m, t) {
   const tC = Math.hypot(t[1], t[2]), tH = Math.atan2(t[2], t[1]);
   const dL = L - m[0];
   const k = dL > 0 ? (100 - t[0]) / Math.max(100 - m[0], 1) : t[0] / Math.max(m[0], 1);
-  return polar(t[0] + dL * clamp(k, 0.3, 1.6), C * (tC / Math.max(mC, 1)), tH + wrap(H - mH) * 0.35);
+  const nL = t[0] + dL * clamp(k, 0.3, 1.6);
+  if (mC < 12) return polar(nL, tC, tH); // a near-grey body: colour it evenly instead of scaling its noise up
+  return polar(nL, C * (tC / mC), tH + wrap(H - mH) * 0.35);
 }
 
 const GOLD = [[22, 12, 22], [48, 14, 45], [72, 6, 62], [92, -2, 48]];
