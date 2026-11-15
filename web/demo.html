@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splatoto playground</title>
+<style>
+  :root { --bg: #f4f2ee; --ink: #1d1b18; --mute: #77726a; --line: #dedad3; --chip: #fff; --accent: #1d1b18; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151413; --ink: #f1eee8; --mute: #9a948b; --line: #2c2a27; --chip: #1f1d1b; --accent: #f1eee8; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { padding: 28px 24px 8px; display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: end; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--mute); margin: 4px 0 0; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 24px 16px; position: sticky; top: 0; background: var(--bg); z-index: 1; }
+  button, label.pick { font: inherit; border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
+  button[aria-pressed="true"] { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  label.pick { display: inline-flex; gap: 8px; align-items: center; }
+  input[type=color] { width: 22px; height: 22px; border: 0; padding: 0; background: none; cursor: pointer; }
+  .sep { width: 1px; height: 22px; background: var(--line); margin: 0 6px; }
+  main { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; padding: 8px 24px 48px; }
+  figure { margin: 0; display: grid; place-items: center; gap: 6px; padding: 14px 6px 10px; border-radius: 14px; }
+  figure:hover { background: var(--chip); }
+  figcaption { color: var(--mute); font-size: 12px; text-align: center; }
+  .note { color: var(--mute); padding: 0 24px 24px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Splatoto playground</h1>
+    <p class="sub">Move the cursor and the emoji turn to follow it. Pick a look, or a colour for the body.</p>
+  </div>
+</header>
+<div class="bar" id="bar">
+  <button data-look="" aria-pressed="true">Original</button>
+  <span class="sep"></span>
+  <label class="pick">Tint <input type="color" id="tint" value="#2f7bff"></label>
+  <label class="pick">Mono <input type="color" id="mono" value="#ff4fa8"></label>
+  <span class="sep"></span>
+  <button data-look="hue 180">Hue 180°</button>
+  <button data-look="pastel">Pastel</button>
+  <button data-look="neon">Neon</button>
+  <button data-look="gold">Gold</button>
+  <button data-look="chrome">Chrome</button>
+  <button data-look="clay">Clay</button>
+  <button data-look="ink">Ink</button>
+  <button data-look="negative">Negative</button>
+  <span class="sep"></span>
+  <button id="spin" aria-pressed="false">Spin</button>
+</div>
+<main id="grid"></main>
+<p class="note">Pictures: SIL Open Font License 1.1, derived from Noto Emoji 3D (Google). Unofficial, not affiliated with Google.</p>
+<script type="module">
+  import "./splatoto-emoji.js";
+  const base = new URLSearchParams(location.search).get("base") || "../sprites/";
+  const index = await fetch(base + "index.json").then((r) => r.json()).catch(() => null);
+  const codes = index ? Object.keys(index.emoji) : ["1f600", "1f436", "1f680", "2764", "1f355", "1f3e0", "1f44d", "1f335"];
+  const grid = document.getElementById("grid");
+  for (const code of codes) {
+    const e = index?.emoji[code];
+    const fig = document.createElement("figure");
+    const el = document.createElement("splatoto-emoji");
+    el.setAttribute("code", code); el.setAttribute("base", base); el.setAttribute("size", "88");
+    if (e) el.setAttribute("label", e.name);
+    el.dataset.has360 = e ? String(!!e.has360) : "true";
+    fig.append(el);
+    const cap = document.createElement("figcaption"); cap.textContent = e ? e.name : code; fig.append(cap);
+    grid.append(fig);
+  }
+  const all = () => grid.querySelectorAll("splatoto-emoji");
+  const bar = document.getElementById("bar");
+  const press = (btn) => bar.querySelectorAll("button[data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  const apply = (look) => all().forEach((el) => look ? el.setAttribute("recolor", look) : el.removeAttribute("recolor"));
+  bar.addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-look]"); if (!b) return;
+    press(b); apply(b.dataset.look);
+  });
+  for (const id of ["tint", "mono"]) {
+    const input = document.getElementById(id);
+    const go = () => { press(null); apply(`${id} ${input.value}`); };
+    input.addEventListener("input", go); input.addEventListener("click", go);
+  }
+  document.getElementById("spin").addEventListener("click", (ev) => {
+    const on = ev.currentTarget.getAttribute("aria-pressed") !== "true";
+    ev.currentTarget.setAttribute("aria-pressed", String(on));
+    all().forEach((el) => el.setAttribute("mode", on && el.dataset.has360 === "true" ? "spin" : "follow"));
+  });
+</script>
+</body>
+</html>
